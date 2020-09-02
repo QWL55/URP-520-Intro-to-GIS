@@ -1,0 +1,229 @@
+---
+title: "URP520-Final-Project-Qiwei-Lin"
+author: "Qiwei Lin"
+date: "4/17/2020"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r External Requirement}
+library(tidyverse)
+library(mice)
+library(boot)
+library(foreign)
+library(pander)
+library(DescTools)
+library(pastecs)
+CD.data <- read.dta("CDIR61FL.dta")
+```
+
+```{r}
+main_variable = c("caseid", "country", "year","province",
+                  "old_province",
+                  "urban","emo_vio", "phy_vio", "sex_vio","violence", 
+                  "marriage", "union1","union2","age", "education", 
+                  "wealth_index", "owning_house","owning_land", 
+                  "owning_property", "wb_justified",
+                  "employ_cash",
+                  "employment","employ_paid","employ_kind",
+                  "employ_mixed", "partner_edu")
+variables = c("caseid","v101","v025", "d104", "d106", "d107", "d108",
+              "v133","v190", "v501", "v502","v731", "v741", "v012", 
+              "v745a","v745b", "v746", "v715", "snprovin", "v744a",
+              "v744b", "v744c", "v744d", "v744e")
+#v190
+process <- function(df, var, ctry, yr, percent = 0.1, seed = 1234){
+  variables <- variables[variables %in% names(df)]
+  df <- df %>% select(variables)
+  if (percent != 1){
+  set.seed(seed)
+  n_row <- nrow(df)
+  sample_id = sample(n_row, floor(percent*n_row))
+  df = df %>% slice(sample_id)
+  }
+  df$country <- ctry
+  df$year <- yr
+#---individual level features---#
+  df$union1 = ifelse(df$v502 == 1, 1, 0)
+  df$union2 = ifelse(grepl(pattern = "currently",x = df$v502), 1, 0) #%>% 
+                    #as.factor()
+  df = df %>% filter(union1 == 1 | union2 == 1)
+#---only keep those who are currently in union
+  df$old_province = df$v101
+  df$province = df$snprovin
+  df$urban = ifelse(df$v025 == "urban", 1, 0) #%>% as.factor()
+  df$emo_vio = ifelse(df$d104 == "no", 0, 1) #%>% as.factor()
+  df$phy_vio = ifelse(df$d106 == "yes" | df$d107 == "yes", 1, 0) #%>% 
+                      #as.factor()
+  df$sex_vio = ifelse(df$d108 == "no", 0, 1) #%>% as.factor()
+  df$violence = ifelse((df$emo_vio == 1 | df$phy_vio == 1) | 
+                             (df$sex_vio == 1), 1, 0) #%>% as.factor()
+  df$marriage = ifelse(df$v501 == "married", 1, 0) #%>% as.factor()
+  df$union1 = ifelse(df$v502 == 1, 1, 0)
+  df$union2 = ifelse(grepl(pattern = "currently",x = df$v502), 1, 0) #%>% 
+                    #as.factor()
+  df$age = as.numeric(df$v012)
+  df$education = df$v133
+  df$education[which(df$education == 99)] = NA
+  df$wealth_index = df$v190
+  # owning property
+  df$owning_house = ifelse(df$v745a != "does not own", T, F) 
+  df$owning_land = ifelse(df$v745b != "does not own", T, F) 
+  df$owning_property = (df$owning_house | df$owning_land)
+  df$employment = ifelse(df$v731 != "no", 1, 0) #%>% as.factor()
+
+  df$employ_paid = ifelse(is.na(df$employment), NA, ifelse(df$v741 %in% 
+                              c("cash only","cash and in-kind",
+                                "in-kind only"), 1, 0)) #%>% as.factor()
+  df$employ_cash = ifelse(is.na(df$employment), NA, ifelse(df$v741 %in% 
+                            c("cash only","cash and in-kind"), 1, 0)) #%>% 
+                               #as.factor()
+  df$employ_kind = ifelse(is.na(df$employment), NA, 
+                          ifelse(df$v741 %in% c("in-kind only",
+                                         "cash and in-kind"), 1, 0)) #%>%                                as.factor()
+  df$employ_mixed = ifelse(is.na(df$employment), NA, 
+                           ifelse(df$v741 %in% 
+                                    c("cash and in-kind"), 1, 0)) #%>%                                as.factor()
+  # women's view toward wife-beating
+  df$v744a = ifelse(df$v744a == "yes", 1, 0)
+  df$v744b = ifelse(df$v744b == "yes", 1, 0)
+  df$v744c = ifelse(df$v744c == "yes", 1, 0)
+  df$v744d = ifelse(df$v744d == "yes", 1, 0)
+  df$v744e = ifelse(df$v744e == "yes", 1, 0)
+  df$wb_justified <- ifelse((df$v744a + df$v744b + df$v744c 
+                                + df$v744d + df$v744e) > 0, 1, 0)
+#---partner characteristics
+  df$partner_edu = df$v715
+  df$partner_edu[which(df$partner_edu == 98)] = NA
+  processed_data <- df %>% select(main_variable) 
+  
+  return(processed_data)
+}
+```
+
+```{r}
+CD <- process(CD.data, var = variables,"CD", "2013", percent = 1)
+```
+
+
+# Descriptive Statistics
+
+```{r}
+missing <- CD %>% select(violence,employ_paid, sex_vio, emo_vio, phy_vio, 
+                         urban,age, education,wealth_index) %>% 
+           md.pairs(.) 
+
+(missing$mm)/nrow(CD)
+```
+
+```{r}
+province <- CD %>% na.omit() %>% 
+            group_by(province) %>% 
+            summarize(prop_violence = mean(violence),
+                      urban_total = sum(urban == 1), 
+                      rural_total = sum(urban == 0),
+                      urban_p = sum(violence[urban == 1])/urban_total, 
+                      rural_p = sum(violence[urban == 0])/rural_total, 
+                      diff = urban_p - rural_p,
+                      wb_p = mean(wb_justified))
+```
+
+```{r}
+cor.test(province$prop_violence,province$wb_p)
+```
+
+
+# Bootstrap
+
+```{r}
+library(magrittr)
+prop <- function(df, index){
+  df_star <- df[index, ]
+  mean(df_star$violence)
+}
+```
+
+
+
+
+```{r}
+province$prop_vio_lwr <- map(.x = province$province, 
+                             .f = 
+                               ~ boot(data = CD %>% na.omit() %>%
+                                      filter(province == .x), 
+                                        statistic = prop, R = 1000) %>% 
+                                 boot.ci(.,type = "perc") %>% unlist() 
+                             %>% extract("percent4") %>% 
+                               as.numeric() %>% round(.,3)) %>% unlist()
+province$prop_vio_upr <- map(.x = province$province, 
+                             .f = 
+                               ~ boot(data = CD %>% na.omit() %>%
+                                      filter(province == .x), 
+                                        statistic = prop, R = 1000) %>% 
+                                 boot.ci(.,type = "perc") %>% unlist() 
+                             %>% extract("percent5") %>% 
+                               as.numeric() %>% round(.,3)) %>% unlist()
+province
+```
+
+```{r}
+ggplot(province, aes(fct_reorder(province,.x = prop_violence,.desc = F),
+                     prop_violence)) + geom_point() +
+  coord_flip() + 
+  geom_errorbar(aes(ymin=prop_vio_lwr, ymax=prop_vio_upr), width=.1) +
+  labs(x = "Province",y = "Proportion of IPV") 
+```
+
+```{r}
+pop <- readxl::read_excel("cod_admpop_2019.xlsx", sheet = 4) %>% 
+  select(admin1Name_fr, F_adulte_2020)
+Province_name <- c("Kinshasa",
+                   "Kwango","Kwilu","Mai-Ndombe","Kongo Central", 
+                   "Equateur", "Mongala", "Nord-Ubangi", "Sud-Ubangi", 
+                   "Tshuapa", "Kasai", "Kasai-Central","Kasai-Oriental",
+                   "Lomami", "Sankuru", "Haut-Katanga", "Haut-Lomami",
+                   "Lualaba", "Tanganyka", "Maniema", "Nord-Kivu",
+                   "Bas-Uele", "Haut-Uele", "Ituri", "Tshopo", 
+                   "Sud-Kivu")
+province$province = Province_name
+province %>% mutate(province = as.character(province)) %>% 
+  left_join(., pop, by = c("province" = "admin1Name_fr")) -> province
+```
+
+```{r}
+province$rural_p = ifelse(province$province == "Kinshasa", 
+                          -2, province$rural_p)
+province$diff = ifelse(province$province == "Kinshasa", 
+                          -2, province$diff)
+province
+```
+
+```{r}
+province <- province %>% 
+  mutate(F_pop_vio = round(F_adulte_2020*prop_violence/1000),
+         F_pop_vio_lwr = round(F_adulte_2020*prop_vio_lwr/1000),
+         F_pop_vio_upr = round(F_adulte_2020*prop_vio_upr/1000))
+province
+write.csv(province,'province.csv')
+```
+
+```{r}
+t.test(province$diff[-1])
+```
+
+```{r}
+p_tb <- CD %>% na.omit() %>% 
+            group_by(province) %>% 
+            summarize(prop_violence = mean(violence),
+                      vio = sum(violence == 1),
+                      non_vio = sum(violence != 1))
+province %>% arrange(desc(prop_violence))
+```
+
+```{r}
+province %>% arrange(desc(wb_p))
+```
+
